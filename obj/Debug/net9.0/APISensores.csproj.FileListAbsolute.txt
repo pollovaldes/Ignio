@@ -50,3 +50,4 @@
 /Users/arturo/Desktop/IOT/Ignio/obj/Debug/net9.0/APISensores.pdb
 /Users/arturo/Desktop/IOT/Ignio/obj/Debug/net9.0/APISensores.genruntimeconfig.cache
 /Users/arturo/Desktop/IOT/Ignio/obj/Debug/net9.0/ref/APISensores.dll
+/Users/arturo/Desktop/IOT/Ignio/obj/Debug/net9.0/APISensores.sourcelink.json
