@@ -35,7 +35,6 @@ build/
 
 # Sensitive certs/keys
 *.pfx
-*.pem
 *.key
 *.cer
 *.crt
