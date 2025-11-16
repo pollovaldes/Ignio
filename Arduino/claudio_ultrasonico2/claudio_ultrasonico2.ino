@@ -1,39 +1,223 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+
+// Times
+#define WIFI_RETRY_DELAY 500
+#define SENSOR_INTERVAL 3000
+#define POST_BLINK_TIME 100
+
+// Pins
 #define LED_VERDE D6
 #define LED_ROJO D7
 #define TRIG D4
 #define ECHO D5
 
-void setup() {
-  pinMode(LED_VERDE, OUTPUT);
-  pinMode(LED_ROJO, OUTPUT);
-  pinMode(TRIG, OUTPUT);
-  pinMode(ECHO, INPUT);
+// WiFi
+const char *ssid = "Mi perro cuando";
+const char *password = "SggUD6o4rWN?7IaOdHqkXv2HB";
 
-  digitalWrite(LED_VERDE, LOW);
-  digitalWrite(LED_ROJO, LOW);
-  Serial.begin(115200);
+// API endpoint
+const char *apiUrl = "http://192.168.1.166:5073/Distance";
+
+// Smooth filter
+float emaDist = -1;
+const float alpha = 0.25;
+
+unsigned long lastRead = 0;
+
+void connectWiFi()
+{
+    Serial.println("\nConectando a WiFi...\n");
+
+    WiFi.begin(ssid, password);
+
+    digitalWrite(LED_ROJO, HIGH);
+    digitalWrite(LED_VERDE, LOW);
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        delay(WIFI_RETRY_DELAY);
+        Serial.print(".");
+    }
+
+    Serial.println("\n\nConectado al WiFi");
+    Serial.print("IP asignada: ");
+    Serial.println(WiFi.localIP());
+
+    digitalWrite(LED_ROJO, LOW);
+    digitalWrite(LED_VERDE, HIGH);
 }
 
-void loop() {
-  digitalWrite(TRIG, LOW);
-  delayMicroseconds(5);
-  digitalWrite(TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG, LOW);
+void restoreWiFiState()
+{
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        digitalWrite(LED_VERDE, HIGH);
+        digitalWrite(LED_ROJO, LOW);
+    }
+    else
+    {
+        digitalWrite(LED_VERDE, LOW);
+        digitalWrite(LED_ROJO, HIGH);
+    }
+}
 
-  long dur = pulseIn(ECHO, HIGH, 30000);
-  float dist = dur * 0.034 / 2;
-
-  if (dur == 0) {
+void blinkOK()
+{
+    digitalWrite(LED_VERDE, LOW);
+    delay(POST_BLINK_TIME);
     digitalWrite(LED_VERDE, HIGH);
-    digitalWrite(LED_ROJO, HIGH);
-    Serial.println("Sin lectura ultrasónico");
-  } else {
-    digitalWrite(LED_ROJO, HIGH);
-    digitalWrite(LED_VERDE, HIGH);
-    Serial.print("Dist: ");
-    Serial.println(dist);
-  }
+    delay(POST_BLINK_TIME);
+    restoreWiFiState();
+}
 
-  delay(1000);
+void blinkError()
+{
+    digitalWrite(LED_ROJO, LOW);
+    delay(POST_BLINK_TIME);
+    digitalWrite(LED_ROJO, HIGH);
+    delay(POST_BLINK_TIME);
+    restoreWiFiState();
+}
+
+float readRawDistance()
+{
+    digitalWrite(TRIG, LOW);
+    delayMicroseconds(4);
+
+    digitalWrite(TRIG, HIGH);
+    delayMicroseconds(12);
+    digitalWrite(TRIG, LOW);
+
+    long duration = pulseIn(ECHO, HIGH, 60000); // timeout mayor
+
+    if (duration == 0)
+    {
+        return -1;
+    }
+
+    float dist = duration * 0.034 / 2;
+    return dist;
+}
+
+float readFilteredDistance()
+{
+    float sum = 0;
+    int validCount = 0;
+
+    for (int i = 0; i < 5; i++)   // 5 muestras
+    {
+        float d = readRawDistance();
+        if (d > 0 && d < 500)     // descarte de valores imposibles
+        {
+            sum += d;
+            validCount++;
+        }
+        delay(5);
+    }
+
+    if (validCount == 0)
+    {
+        return -1;
+    }
+
+    float avg = sum / validCount;
+
+    // Si primera vez, inicializar el EMA
+    if (emaDist < 0)
+    {
+        emaDist = avg;
+        return avg;
+    }
+
+    const float alpha = 0.45; 
+    emaDist = alpha * avg + (1 - alpha) * emaDist;
+
+    return emaDist;
+}
+
+void setup()
+{
+    pinMode(LED_VERDE, OUTPUT);
+    pinMode(LED_ROJO, OUTPUT);
+    pinMode(TRIG, OUTPUT);
+    pinMode(ECHO, INPUT);
+
+    digitalWrite(LED_VERDE, LOW);
+    digitalWrite(LED_ROJO, HIGH);
+
+    Serial.begin(115200);
+    delay(300);
+
+    Serial.println("\nNodo Ultrasonico iniciado...\n");
+
+    connectWiFi();
+}
+
+void loop()
+{
+    unsigned long now = millis();
+
+    if (now - lastRead >= SENSOR_INTERVAL)
+    {
+        lastRead = now;
+
+        Serial.println("\n-----------------------------");
+        Serial.println("Leyendo HC-SR04...");
+
+        float dist = readFilteredDistance();
+
+        if (dist < 0)
+        {
+            Serial.println("Lectura inválida del sensor ultrasónico");
+        }
+        else
+        {
+            Serial.print("Distancia (cm): ");
+            Serial.println(dist);
+        }
+
+        if (WiFi.status() != WL_CONNECTED)
+        {
+            Serial.println("Sin conexión, reintentando WiFi...");
+            connectWiFi();
+            return;
+        }
+
+        HTTPClient http;
+        WiFiClient client;
+
+        http.begin(client, apiUrl);
+        http.addHeader("Content-Type", "application/json");
+
+        String json;
+
+        if (dist < 0)
+        {
+            json = "{\"idDevice\":4,\"distanceCm\":null}";
+        }
+        else
+        {
+            json = String("{\"idDevice\":4,\"distanceCm\":") + dist + "}";
+        }
+
+        Serial.println("\nEnviando POST...");
+        Serial.println(json);
+
+        int code = http.POST(json);
+
+        Serial.print("Código respuesta servidor: ");
+        Serial.println(code);
+
+        if (code == 200)
+        {
+            blinkOK();
+        }
+        else
+        {
+            blinkError();
+        }
+
+        http.end();
+    }
 }
