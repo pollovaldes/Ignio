@@ -1,0 +1,6 @@
+@ApiSmokeSensor_HostAddress = http://localhost:5022
+
+GET {{ApiSmokeSensor_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

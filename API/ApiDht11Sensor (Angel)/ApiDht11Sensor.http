@@ -1,0 +1,6 @@
+@ApiDht11Sensor_HostAddress = http://localhost:5137
+
+GET {{ApiDht11Sensor_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

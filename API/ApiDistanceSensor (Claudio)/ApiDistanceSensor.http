@@ -1,0 +1,6 @@
+@ApiDistanceSensor_HostAddress = http://localhost:5239
+
+GET {{ApiDistanceSensor_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
