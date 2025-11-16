@@ -1,6 +1,6 @@
-#define LED_VERDE D6
-#define LED_ROJO D7
-#define PHOTO A0
+#define LED_VERDE D4
+#define LED_ROJO D5
+#define SMOKE A0
 
 void setup() {
   pinMode(LED_VERDE, OUTPUT);
@@ -12,16 +12,16 @@ void setup() {
 }
 
 void loop() {
-  int value = analogRead(PHOTO);
+  int value = analogRead(SMOKE);
 
   if (value < 0 || value > 1023) {
     digitalWrite(LED_VERDE, HIGH);
     digitalWrite(LED_ROJO, HIGH);
-    Serial.println("Lectura invalida fotoresistencia");
+    Serial.println("Lectura invalida MQ2");
   } else {
     digitalWrite(LED_ROJO, HIGH);
     digitalWrite(LED_VERDE, HIGH);
-    Serial.print("Light: ");
+    Serial.print("Humo: ");
     Serial.println(value);
   }
 
