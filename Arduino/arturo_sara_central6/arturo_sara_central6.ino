@@ -1,96 +1,71 @@
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <ArduinoJson.h>
-#include "uuid_utils.h"
+#include "Config.h"
+#include "WiFiManager.h"
+#include "LEDController.h"
+#include "BuzzerController.h"
+#include "ButtonController.h"
+#include "APIClient.h"
+#include "SensorDataManager.h"
+#include "AlertManager.h"
+#include "WarningManager.h"
+#include "StateMachine.h"
 
-#include "pins.h"
-#include "constants.h"
-#include "central_state.h"
-#include "wifi_client.h"
-#include "utils_leds.h"
-#include "utils_buzzer.h"
-#include "utils_strobe.h"
-#include "server_time.h"
-#include "api_client.h"
-#include "button_logic.h"
-#include "warning_logic.h"
-#include "fire_logic.h"
-
-unsigned long lastWindowStart = 0;
-bool windowActive = false;
+// Instancias globales
+WiFiManager wifiManager;
+LEDController ledController;
+BuzzerController buzzerController;
+ButtonController buttonController;
+APIClient apiClient;
+SensorDataManager sensorDataManager;
+AlertManager alertManager;
+WarningManager warningManager;
+StateMachine stateMachine;
 
 void setup()
 {
     Serial.begin(115200);
-    delay(300);
-
-    pinMode(LED_R, OUTPUT);
-    pinMode(LED_G, OUTPUT);
-    pinMode(LED_B, OUTPUT);
-    pinMode(BUZZER, OUTPUT);
-    pinMode(STROBE, OUTPUT);
-
-    pinMode(BTN_START, INPUT_PULLUP);
-    pinMode(BTN_REAL,  INPUT_PULLUP);
-    pinMode(BTN_FALSE, INPUT_PULLUP);
-
-    pinMode(POT, INPUT);
-
-    setLEDRed();
-    connectWiFi();
-
-    Serial.println("\nCentral lista\n");
+    delay(100);
+    
+    Serial.println("=== IGNIO Central v6.0 ===");
+    Serial.println("Inicializando sistema...");
+    
+    // Inicializar componentes
+    ledController.init();
+    buzzerController.init();
+    buttonController.init();
+    
+    // Mostrar LED rojo mientras no hay WiFi
+    ledController.setConnectionState(false);
+    
+    // Inicializar WiFi
+    wifiManager.init();
+    
+    // Inicializar API client
+    apiClient.init(&wifiManager, &ledController);
+    
+    // Inicializar managers
+    sensorDataManager.init();
+    alertManager.init(&apiClient, &ledController, &buzzerController, &sensorDataManager);
+    warningManager.init(&apiClient, &ledController, &buzzerController);
+    
+    // Inicializar maquina de estados
+    stateMachine.init(&wifiManager, &ledController, &buzzerController, &buttonController, 
+                      &apiClient, &sensorDataManager, &alertManager, &warningManager);
+    
+    Serial.println("Sistema inicializado correctamente");
 }
 
 void loop()
 {
-    ensureWiFi();
-
-    updateButtons();
-
-    unsigned long now = millis();
-
-    if (!fireActive && !warningActive && (now - lastWindowStart >= READ_WINDOW_MS))
-    {
-        Serial.println("\nINICIANDO NUEVA VENTANA DE LECTURAS...");
-        lastWindowStart = now;
-        windowActive = true;
-    }
-
-    if (windowActive && !fireActive)
-    {
-        static unsigned long windowReadCount = 0;
-        windowReadCount++;
-
-        int smokeVal = analogRead(A0) % 500;
-
-        if (smokeVal > SMOKE_THRESHOLD)
-        {
-            triggerWarning();
-        }
-
-        if (windowReadCount >= 5)
-        {
-            Serial.println("Evaluando resultados ventana...");
-
-            if (smokeVal > FIRE_SMOKE_THRESHOLD)
-            {
-                startFireAlert(1, "automatic");
-            }
-
-            windowReadCount = 0;
-            windowActive = false;
-        }
-    }
-
-    if (fireActive)
-    {
-        updateFireAlert();
-    }
-    else
-    {
-        updateWarning();
-    }
-
-    delay(10);
+    // Actualizar estado de WiFi
+    wifiManager.update();
+    
+    // Actualizar controladores fisicos
+    ledController.update();
+    buzzerController.update();
+    buttonController.update();
+    
+    // Ejecutar maquina de estados principal
+    stateMachine.update();
+    
+    yield();
 }
