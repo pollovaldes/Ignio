@@ -3,31 +3,66 @@
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
 
+// ========================================================================
+// MÁQUINA DE ESTADOS - ORDEN DE PRIORIDAD
+// ========================================================================
+// 1. ALERTA ACTIVA (MODE_ALERT)
+//    - Máxima prioridad, no puede ser interrumpida por nada
+//    - Física: LED rojo + buzzer + strobe
+//    - Si POST/PUT falla: entra en HTTP_WARNING pero alerta sigue
+//    - Security warnings se cancelan si hay alerta
+//    - Senseo se detiene durante alerta
+//
+// 2. HTTP WARNING (MODE_HTTP_WARNING)
+//    - Activo solo si NO hay alerta
+//    - Reintenta operación fallida cada 3 segundos
+//    - Si alerta inicia durante WARNING: alerta toma prioridad
+//    - Física: LED amarillo + buzzer pausa lenta
+//
+// 3. SECURITY WARNING (MODE_SECURITY_WARNING)
+//    - Activo solo si NO hay alerta ni HTTP_WARNING
+//    - Dura exactamente 10 segundos (no bloqueante)
+//    - Física: LED naranja + patrón 3 pitidos
+//    - Guarda tipo de warning (distancia o movimiento)
+//
+// 4. IDLE (MODE_IDLE)
+//    - Senseo cada 7 segundos
+//    - Escucha botones para alertas manuales
+//    - Física: LED verde (WiFi ok) o rojo (WiFi down)
+//
+// EDGE CASES MANEJADOS:
+// - Alerta sin timestamp: física activa, HTTP_WARNING reintenta
+// - WiFi cae durante alerta: alerta sigue, HTTP_WARNING activo
+// - Alerta inicia mientras HTTP_WARNING: alerta tiene prioridad
+// - Security warning durante alerta: se cancela
+// - Múltiples HTTPs fallidos: timeout y reintento indefinido
+// ========================================================================
+
 // Tiempos base
-#define WIFI_RETRY_DELAY_MS 500      // Tiempo entre reintentos de WiFi
-#define SENSE_INTERVAL_MS 7000       // Intervalo entre rondas de senseo
-#define BUTTON_POLL_DELAY_MS 20      // Pequeño delay para el loop
-#define HTTP_TIMEOUT_MS 5000         // Timeout razonable para peticiones HTTP
+#define WIFI_RETRY_DELAY_MS 500
+#define SENSE_INTERVAL_MS 7000
+#define BUTTON_POLL_DELAY_MS 20
+#define HTTP_TIMEOUT_MS 5000
 
 // Hardware central
-#define LED_R D0                     // Rojo RGB
-#define LED_G D5                     // Verde RGB
-#define LED_B D6                     // Azul RGB
-#define BUZZER D3                    // Buzzer
-#define STROBE D2                    // Estrobo LED
+#define LED_R D0
+#define LED_G D5
+#define LED_B D6
+#define BUZZER D3
+#define STROBE D2
 
-#define BTN_START D1                 // Boton iniciar alerta
-#define BTN_REAL D7                  // Boton finalizar alerta REAL
-#define BTN_FALSE D4                 // Boton finalizar alerta FALSA
+#define BTN_START D1
+#define BTN_REAL D7
+#define BTN_FALSE D4
 
-#define POT_PIN A0                   // Potenciometro para patron del buzzer
+#define POT_PIN A0
 
 // Configuracion WiFi
 const char *WIFI_SSID = "Mi perro cuando";
 const char *WIFI_PASSWORD = "SggUD6o4rWN?7IaOdHqkXv2HB";
 
 // API central
-#define CENTRAL_DEVICE_ID 1          // id_device de la central en la tabla device
+#define CENTRAL_DEVICE_ID 1
 const char *API_BASE = "http://192.168.1.166:5075";
 const char *TIME_ENDPOINT = "/Time";
 const char *READINGS_SINCE_BASE = "/Readings/since/";
@@ -40,6 +75,11 @@ const char *WARNING_ENDPOINT = "/Warning";
 #define LIGHT_THRESHOLD 300.0f
 #define SMOKE_THRESHOLD 350.0f
 
+// Umbrales de seguridad
+#define DISTANCE_CHANGE_THRESHOLD_CM 10.0f
+#define PIR_MOTION_THRESHOLD 1              // Al menos 1 movimiento real (> 3s)
+#define SECURITY_WARNING_DURATION_MS 10000
+
 // Patron de alerta para buzzer y estrobo
 #define ALERT_BEEP_MIN_HZ 1200
 #define ALERT_BEEP_MAX_HZ 2600
@@ -48,19 +88,26 @@ const char *WARNING_ENDPOINT = "/Warning";
 #define ALERT_STROBE_ON_MS 80
 #define ALERT_STROBE_OFF_MS 120
 
-// Patron de warning (cuando falla una operacion HTTP)
-#define WARNING_BEEP_MIN_HZ 800
-#define WARNING_BEEP_MAX_HZ 1200
-#define WARNING_BLINK_MS 400       // Tiempo de cada parpadeo (prendido Y apagado = 400ms total = 0.4s)
-#define WARNING_BEEP_DURATION_MS 150  // Duracion del beep cuando pita
-#define WARNING_RETRY_DELAY_MS 3000
+// Patron de HTTP warning (LED amarillo parpadeante)
+#define HTTP_WARNING_BEEP_MIN_HZ 800
+#define HTTP_WARNING_BEEP_MAX_HZ 1200
+#define HTTP_WARNING_BLINK_MS 400
+#define HTTP_WARNING_BEEP_DURATION_MS 150
+#define HTTP_WARNING_RETRY_DELAY_MS 3000
+
+// Patron de SECURITY warning (LED naranja fuerte: ON-OFF-ON-OFF-ON-OFF-pausa)
+#define SECURITY_WARNING_ON_MS 150
+#define SECURITY_WARNING_OFF_MS 150
+#define SECURITY_WARNING_PAUSE_MS 400
+#define SECURITY_WARNING_BEEP_HZ 1500
 
 // Estados de la central
 enum CentralMode
 {
     MODE_IDLE = 0,
     MODE_ALERT = 1,
-    MODE_WARNING = 2
+    MODE_HTTP_WARNING = 2,
+    MODE_SECURITY_WARNING = 3
 };
 
 // Variables globales de estado
@@ -71,9 +118,10 @@ String currentAlertUuid = "";
 String alertStartTimestamp = "";
 unsigned long alertStartMillis = 0;
 
-// Control de senseo
+// Control de alertas
 unsigned long lastSenseMillis = 0;
 String lastWindowTimestamp = "";
+#define ALERT_ORPHAN_TIMEOUT_MS 120000  // 2 minutos sin comunicación = alerta huérfana termina
 
 // Estados de botones
 bool lastStartPressed = false;
@@ -85,19 +133,25 @@ unsigned long lastAlertPatternMillis = 0;
 bool alertBeepOn = false;
 bool alertStrobeOn = false;
 
-// Variables para modo WARNING
-bool warningActive = false;
-String warningFailureReason = "";
-unsigned long lastWarningRetryMillis = 0;
-String pendingOperationType = "";
-String pendingHttpMethod = "";  // "GET", "POST", "PUT"
+// Variables para modo HTTP WARNING
+bool httpWarningActive = false;
+String httpWarningFailureReason = "";
+unsigned long lastHttpWarningRetryMillis = 0;
+String pendingHttpMethod = "";
 String pendingPath = "";
 String pendingPayload = "";
+unsigned long lastHttpWarningPatternMillis = 0;
+bool httpWarningBeepOn = false;
 
-// Control del patron de warning
-unsigned long lastWarningPatternMillis = 0;
-bool warningBeepOn = false;
-bool warningStrobeOn = false;
+// Variables para modo SECURITY WARNING
+bool securityWarningActive = false;
+unsigned long securityWarningStartMillis = 0;
+unsigned long securityWarningEndMillis = 0;
+float baselineDistance = 0.0f;
+bool baselineSet = false;
+unsigned long lastSecurityPatternMillis = 0;
+const char *securityWarningType = "";
+#define SECURITY_WARNING_BASELINE_SAMPLES 3
 
 // Prototipos
 void connectWiFi();
@@ -106,7 +160,8 @@ void updateConnectionLed();
 void setLedWifiConnected();
 void setLedWifiDisconnected();
 void setLedAlertMode();
-void setLedWarningMode();
+void setLedHttpWarningMode();
+void setLedSecurityWarningMode();
 void clearAlertOutputs();
 void clearWarningOutputs();
 
@@ -122,7 +177,8 @@ bool getReadingsSince(
     float &avgLight, bool &hasLight,
     float &avgSmoke, bool &hasSmoke,
     float &avgPir, bool &hasPir,
-    float &avgDistance, bool &hasDistance
+    float &avgDistance, bool &hasDistance,
+    int &motionCount
 );
 
 String generateUuid();
@@ -134,19 +190,70 @@ void handleButtons();
 void startAlert(bool manual, int numSensorsTriggered);
 void endAlert(bool isReal);
 void updateAlertEffects();
-void handleWarningMode();
-void updateWarningEffects();
-void enterWarningMode(const String &reason, const String &httpMethod, const String &path, const String &payload);
+void handleHttpWarningMode();
+void updateHttpWarningEffects();
+void enterHttpWarningMode(const String &reason, const String &httpMethod, const String &path, const String &payload);
 void retryPendingHttpRequest();
+void postSecurityWarningToApi(const char *warningType);
 
-// Helpers HTTP internos sin warning
 bool httpGetJsonRaw(const String &path, DynamicJsonDocument &doc);
 bool httpPostJsonRaw(const String &path, const String &payload);
 bool httpPutJsonRaw(const String &path, const String &payload);
 
-// -----------------------------------------------------------------------------
-// Setup
-// -----------------------------------------------------------------------------
+void postWarningToApi()
+{
+    DynamicJsonDocument doc(512);
+    
+    doc["idDevice"] = CENTRAL_DEVICE_ID;
+    doc["message"] = "Fallo HTTP al conectar con API central";
+    
+    if (pendingHttpMethod == "GET")
+    {
+        doc["warningType"] = "http_get_failed";
+    }
+    else if (pendingHttpMethod == "POST")
+    {
+        doc["warningType"] = "http_post_failed";
+    }
+    else if (pendingHttpMethod == "PUT")
+    {
+        doc["warningType"] = "http_put_failed";
+    }
+    else
+    {
+        doc["warningType"] = "connection_lost";
+    }
+    
+    doc["httpMethod"] = pendingHttpMethod;
+    doc["httpEndpoint"] = pendingPath;
+
+    String payload;
+    serializeJson(doc, payload);
+
+    Serial.println("\n[WARNING] Registrando fallo HTTP en BD...");
+    Serial.println(payload);
+
+    bool success = httpPostJsonRaw(String(WARNING_ENDPOINT), payload);
+    
+    if (success)
+    {
+        Serial.println("[WARNING] Registrado exitosamente en BD");
+    }
+    else
+    {
+        Serial.println("[WARNING] Fallo al registrar en BD (pero reintentó la operación original)");
+    }
+}
+
+
+
+bool httpGetJsonRaw(const String &path, DynamicJsonDocument &doc);
+bool httpPostJsonRaw(const String &path, const String &payload);
+bool httpPutJsonRaw(const String &path, const String &payload);
+
+// ========================================================================
+// SETUP
+// ========================================================================
 void setup()
 {
     pinMode(LED_R, OUTPUT);
@@ -175,61 +282,88 @@ void setup()
     {
         Serial.println("No se pudo obtener timestamp inicial del servidor, usando valor vacio.\n");
         lastWindowTimestamp = "";
-        // Si falla aquí, ya debería estar en MODE_WARNING gracias a httpGetJson
-        // No sobrescribir con updateConnectionLed()
     }
     else
     {
-        // Solo actualizar LED si NO estamos en warning
         currentMode = MODE_IDLE;
         updateConnectionLed();
     }
 }
 
-// -----------------------------------------------------------------------------
-// Loop principal
-// -----------------------------------------------------------------------------
+// ========================================================================
+// LOOP PRINCIPAL - MÁQUINA DE ESTADOS ROBUSTA
+// ========================================================================
 void loop()
 {
     handleButtons();
 
-    if (currentMode == MODE_WARNING)
-    {
-        handleWarningMode();
-    }
-    else if (alertActive)
-    {
-        updateAlertEffects();
-    }
-    else
-    {
-        noTone(BUZZER);
-        digitalWrite(STROBE, LOW);
-    }
-
     unsigned long now = millis();
 
-    if (!alertActive && currentMode != MODE_WARNING && (now - lastSenseMillis >= SENSE_INTERVAL_MS))
+    // PRIORIDAD 1: ALERTA ACTIVA (máxima prioridad, no puede ser interrumpida)
+    if (alertActive)
     {
-        lastSenseMillis = now;
-        runSenseCycle();
+        updateAlertEffects();
+        
+        // Si hay security warning activo, cancelarlo
+        if (securityWarningActive)
+        {
+            securityWarningActive = false;
+            baselineSet = false;
+            clearWarningOutputs();
+        }
+        
+        // Si entra en HTTP_WARNING, mantener alerta pero el HTTP_WARNING se maneja en paralelo
+        if (currentMode != MODE_ALERT && currentMode != MODE_HTTP_WARNING)
+        {
+            currentMode = MODE_ALERT;
+        }
     }
-
-    if (!alertActive && currentMode != MODE_WARNING)
+    // PRIORIDAD 2: HTTP_WARNING (solo si no hay alerta)
+    else if (httpWarningActive && currentMode == MODE_HTTP_WARNING)
     {
+        handleHttpWarningMode();
+    }
+    // PRIORIDAD 3: SECURITY_WARNING (solo si no hay alerta ni HTTP_WARNING)
+    else if (securityWarningActive && currentMode == MODE_SECURITY_WARNING)
+    {
+        updateSecurityWarningEffects();
+        
+        if (now >= securityWarningEndMillis)
+        {
+            Serial.println("[SECURITY] Warning expired");
+            postSecurityWarningToApi(securityWarningType);
+            securityWarningActive = false;
+            baselineSet = false;
+            currentMode = MODE_IDLE;
+            clearWarningOutputs();
+            updateConnectionLed();
+        }
+    }
+    // PRIORIDAD 4: IDLE (senseo y preparación)
+    else
+    {
+        currentMode = MODE_IDLE;
+        noTone(BUZZER);
+        digitalWrite(STROBE, LOW);
         updateConnectionLed();
+        
+        // Solo senseo si no hay nada activo
+        if (now - lastSenseMillis >= SENSE_INTERVAL_MS)
+        {
+            lastSenseMillis = now;
+            runSenseCycle();
+        }
     }
 
     delay(BUTTON_POLL_DELAY_MS);
 }
 
-// -----------------------------------------------------------------------------
-// Gestion de WiFi
-// -----------------------------------------------------------------------------
+// ========================================================================
+// GESTION DE WiFi
+// ========================================================================
 void connectWiFi()
 {
     Serial.println("\nConectando a WiFi...\n");
-
     setLedWifiDisconnected();
 
     WiFi.mode(WIFI_STA);
@@ -259,18 +393,26 @@ void ensureWiFi()
 
 void updateConnectionLed()
 {
-    if (currentMode == MODE_ALERT)
+    // PRIORIDAD: si hay HTTP WARNING activo, LED amarillo (no importa nada)
+    if (httpWarningActive)
     {
-        setLedAlertMode();
+        setLedHttpWarningMode();
         return;
     }
 
-    if (currentMode == MODE_WARNING)
+    // ALERTA activa: LED rojo (se maneja en updateAlertEffects)
+    if (alertActive)
     {
-        setLedWarningMode();
         return;
     }
 
+    // SECURITY WARNING: se maneja en updateSecurityWarningEffects
+    if (securityWarningActive)
+    {
+        return;
+    }
+
+    // IDLE: mostrar estado de WiFi
     if (WiFi.status() == WL_CONNECTED)
     {
         setLedWifiConnected();
@@ -302,9 +444,15 @@ void setLedAlertMode()
     digitalWrite(LED_B, LOW);
 }
 
-void setLedWarningMode()
+void setLedHttpWarningMode()
 {
-    // Amarillo (Rojo + Verde)
+    digitalWrite(LED_R, HIGH);
+    digitalWrite(LED_G, HIGH);
+    digitalWrite(LED_B, LOW);
+}
+
+void setLedSecurityWarningMode()
+{
     digitalWrite(LED_R, HIGH);
     digitalWrite(LED_G, HIGH);
     digitalWrite(LED_B, LOW);
@@ -322,9 +470,9 @@ void clearWarningOutputs()
     digitalWrite(STROBE, LOW);
 }
 
-// -----------------------------------------------------------------------------
-// Helpers HTTP INTERNOS (Sin warning - para reintentos)
-// -----------------------------------------------------------------------------
+// ========================================================================
+// HELPERS HTTP - RAW (sin warning)
+// ========================================================================
 bool httpGetJsonRaw(const String &path, DynamicJsonDocument &doc)
 {
     ensureWiFi();
@@ -413,19 +561,17 @@ bool httpPutJsonRaw(const String &path, const String &payload)
     return (code >= 200 && code < 300);
 }
 
-// -----------------------------------------------------------------------------
-// Helpers HTTP PUBLICOS (Con warning automático)
-// -----------------------------------------------------------------------------
+// ========================================================================
+// HELPERS HTTP - CON WARNING AUTOMATICO
+// ========================================================================
 bool httpGetJson(const String &path, DynamicJsonDocument &doc)
 {
     bool success = httpGetJsonRaw(path, doc);
     
-    // Entrar a warning SIEMPRE que falle, excepto si ya estamos en warning
-    // (evita re-entrar constantemente)
-    if (!success && !warningActive)
+    if (!success && !httpWarningActive)
     {
         String reason = "HTTP GET fallo";
-        enterWarningMode(reason, "GET", path, "");
+        enterHttpWarningMode(reason, "GET", path, "");
     }
 
     return success;
@@ -435,10 +581,10 @@ bool httpPostJson(const String &path, const String &payload)
 {
     bool success = httpPostJsonRaw(path, payload);
     
-    if (!success && !warningActive)
+    if (!success && !httpWarningActive)
     {
         String reason = "HTTP POST fallo";
-        enterWarningMode(reason, "POST", path, payload);
+        enterHttpWarningMode(reason, "POST", path, payload);
     }
 
     return success;
@@ -448,18 +594,18 @@ bool httpPutJson(const String &path, const String &payload)
 {
     bool success = httpPutJsonRaw(path, payload);
     
-    if (!success && !warningActive)
+    if (!success && !httpWarningActive)
     {
         String reason = "HTTP PUT fallo";
-        enterWarningMode(reason, "PUT", path, payload);
+        enterHttpWarningMode(reason, "PUT", path, payload);
     }
 
     return success;
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // /Time
-// -----------------------------------------------------------------------------
+// ========================================================================
 bool getServerTime(String &outTimestamp)
 {
     DynamicJsonDocument doc(256);
@@ -484,9 +630,12 @@ bool getServerTime(String &outTimestamp)
     return true;
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // /Readings/since/{timestamp}
-// -----------------------------------------------------------------------------
+// ARREGLADO PARA:
+// 1. Buscar "dht11" en lugar de "temperature"
+// 2. Contar eventos PIR (motionCount)
+// ========================================================================
 bool getReadingsSince(
     const String &sinceTimestamp,
     float &avgTemp, bool &hasTemp,
@@ -494,7 +643,8 @@ bool getReadingsSince(
     float &avgLight, bool &hasLight,
     float &avgSmoke, bool &hasSmoke,
     float &avgPir, bool &hasPir,
-    float &avgDistance, bool &hasDistance
+    float &avgDistance, bool &hasDistance,
+    int &motionCount
 )
 {
     hasTemp = false;
@@ -503,6 +653,7 @@ bool getReadingsSince(
     hasSmoke = false;
     hasPir = false;
     hasDistance = false;
+    motionCount = 0;
 
     avgTemp = NAN;
     avgHum = NAN;
@@ -539,9 +690,10 @@ bool getReadingsSince(
     double sumDistance = 0.0;
     int countDistance = 0;
 
-    if (doc.containsKey("temperature"))
+    // ========== TEMPERATURA (bajo "dht11", no "temperature") ==========
+    if (doc.containsKey("dht11"))
     {
-        JsonArray arr = doc["temperature"].as<JsonArray>();
+        JsonArray arr = doc["dht11"].as<JsonArray>();
         for (JsonVariant v : arr)
         {
             if (!v.is<JsonObject>())
@@ -549,11 +701,13 @@ bool getReadingsSince(
             JsonObject obj = v.as<JsonObject>();
             if (obj["value"].isNull())
                 continue;
-            sumTemp += obj["value"].as<double>();
+            double val = obj["value"].as<double>();
+            sumTemp += val;
             countTemp++;
         }
     }
 
+    // ========== HUMEDAD (bajo "humidity") ==========
     if (doc.containsKey("humidity"))
     {
         JsonArray arr = doc["humidity"].as<JsonArray>();
@@ -564,11 +718,13 @@ bool getReadingsSince(
             JsonObject obj = v.as<JsonObject>();
             if (obj["value"].isNull())
                 continue;
-            sumHum += obj["value"].as<double>();
+            double val = obj["value"].as<double>();
+            sumHum += val;
             countHum++;
         }
     }
 
+    // ========== LUZ (bajo "light") ==========
     if (doc.containsKey("light"))
     {
         JsonArray arr = doc["light"].as<JsonArray>();
@@ -579,11 +735,13 @@ bool getReadingsSince(
             JsonObject obj = v.as<JsonObject>();
             if (obj["value"].isNull())
                 continue;
-            sumLight += obj["value"].as<double>();
+            double val = obj["value"].as<double>();
+            sumLight += val;
             countLight++;
         }
     }
 
+    // ========== HUMO (bajo "smoke") ==========
     if (doc.containsKey("smoke"))
     {
         JsonArray arr = doc["smoke"].as<JsonArray>();
@@ -594,14 +752,22 @@ bool getReadingsSince(
             JsonObject obj = v.as<JsonObject>();
             if (obj["value"].isNull())
                 continue;
-            sumSmoke += obj["value"].as<double>();
+            double val = obj["value"].as<double>();
+            sumSmoke += val;
             countSmoke++;
         }
     }
 
+    // ========== PIR (bajo "pir") - PARSEA duration_seconds Y FILTRA RUIDO ==========
+    // IMPORTANTE: Filtrar movimientos cortos (ruido) vs movimientos reales
+    #define PIR_REAL_MOTION_MIN_SECONDS 3.0f  // Solo contar duraciones > 3 segundos
+    
     if (doc.containsKey("pir"))
     {
         JsonArray arr = doc["pir"].as<JsonArray>();
+        motionCount = 0;
+        int totalPirEvents = 0;
+        
         for (JsonVariant v : arr)
         {
             if (!v.is<JsonObject>())
@@ -609,11 +775,41 @@ bool getReadingsSince(
             JsonObject obj = v.as<JsonObject>();
             if (obj["value"].isNull())
                 continue;
-            sumPir += obj["value"].as<bool>() ? 1.0 : 0.0;
+            
+            // Ahora "value" es duration_seconds (float), no boolean
+            double durationSeconds = obj["value"].as<double>();
+            
+            // Usar duración como indicador de movimiento
+            sumPir += durationSeconds;
             countPir++;
+            totalPirEvents++;
+            
+            // Contar SOLO movimientos reales (> PIR_REAL_MOTION_MIN_SECONDS)
+            if (durationSeconds >= PIR_REAL_MOTION_MIN_SECONDS)
+            {
+                motionCount++;
+                Serial.print("  [PIR] Movimiento real detectado: ");
+                Serial.print(durationSeconds);
+                Serial.println("s");
+            }
+            else
+            {
+                Serial.print("  [PIR] Ruido/falso positivo: ");
+                Serial.print(durationSeconds);
+                Serial.println("s (descartado)");
+            }
+        }
+        
+        if (totalPirEvents > 0)
+        {
+            Serial.print("  [PIR] Total eventos en ventana: ");
+            Serial.print(totalPirEvents);
+            Serial.print(" | Movimientos reales: ");
+            Serial.println(motionCount);
         }
     }
 
+    // ========== DISTANCIA (bajo "distance") ==========
     if (doc.containsKey("distance"))
     {
         JsonArray arr = doc["distance"].as<JsonArray>();
@@ -624,11 +820,13 @@ bool getReadingsSince(
             JsonObject obj = v.as<JsonObject>();
             if (obj["value"].isNull())
                 continue;
-            sumDistance += obj["value"].as<double>();
+            double val = obj["value"].as<double>();
+            sumDistance += val;
             countDistance++;
         }
     }
 
+    // ========== CALCULAR PROMEDIOS ==========
     if (countTemp > 0)
     {
         avgTemp = (float)(sumTemp / countTemp);
@@ -660,6 +858,7 @@ bool getReadingsSince(
         hasDistance = true;
     }
 
+    // ========== IMPRIMIR RESUMEN ==========
     Serial.println("\nResumen promedio de la ventana:");
     if (hasTemp) { Serial.print("  Temp promedio: "); Serial.println(avgTemp); }
     else { Serial.println("  Temp promedio: sin datos"); }
@@ -673,18 +872,21 @@ bool getReadingsSince(
     if (hasSmoke) { Serial.print("  Humo promedio: "); Serial.println(avgSmoke); }
     else { Serial.println("  Humo promedio: sin datos"); }
     
-    if (hasPir) { Serial.print("  PIR promedio (0-1): "); Serial.println(avgPir); }
+    if (hasPir) { Serial.print("  PIR promedio duración (s): "); Serial.println(avgPir); }
     else { Serial.println("  PIR promedio: sin datos"); }
     
     if (hasDistance) { Serial.print("  Distancia promedio (cm): "); Serial.println(avgDistance); }
     else { Serial.println("  Distancia promedio: sin datos"); }
+    
+    Serial.print("  Movimientos REALES detectados (>3s): ");
+    Serial.println(motionCount);
 
     return true;
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // UUID
-// -----------------------------------------------------------------------------
+// ========================================================================
 String generateUuid()
 {
     const char *hexChars = "0123456789abcdef";
@@ -706,9 +908,9 @@ String generateUuid()
     return uuid;
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // /Alert (POST y PUT)
-// -----------------------------------------------------------------------------
+// ========================================================================
 bool sendCreateAlert(const String &uuid, const String &timestampStarted, int numSensorsTriggered, const char *alertType)
 {
     DynamicJsonDocument doc(256);
@@ -722,14 +924,18 @@ bool sendCreateAlert(const String &uuid, const String &timestampStarted, int num
     String payload;
     serializeJson(doc, payload);
 
-    Serial.println("\nEnviando alerta (POST /Alert)...");
+    Serial.println("\n[ALERT-POST] Sending alert creation...");
     Serial.println(payload);
 
     bool ok = httpPostJson(String(ALERT_ENDPOINT), payload);
 
     if (ok)
     {
-        Serial.println("Alerta creada correctamente en el servidor.");
+        Serial.println("[ALERT-POST] Alert created successfully");
+    }
+    else
+    {
+        Serial.println("[ALERT-POST] Alert creation failed, entering HTTP_WARNING");
     }
 
     return ok;
@@ -748,40 +954,47 @@ bool sendUpdateAlert(const String &uuid, const String &timestampEnded, bool isRe
 
     String path = String(ALERT_ENDPOINT) + "/" + uuid;
 
-    Serial.println("\nActualizando alerta (PUT /Alert/{uuid})...");
+    Serial.println("\n[ALERT-PUT] Sending alert end...");
+    Serial.print("[ALERT-PUT] UUID: ");
+    Serial.println(uuid);
     Serial.println(payload);
 
     bool ok = httpPutJson(path, payload);
 
     if (ok)
     {
-        Serial.println("Alerta actualizada correctamente en el servidor.");
+        Serial.println("[ALERT-PUT] Alert ended successfully");
+    }
+    else
+    {
+        Serial.println("[ALERT-PUT] Alert end failed, entering HTTP_WARNING");
     }
 
     return ok;
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // Ronda de senseo
-// -----------------------------------------------------------------------------
+// ========================================================================
 void runSenseCycle()
 {
     Serial.println("\n================================");
-    Serial.println("Iniciando ronda de senseo simple");
+    Serial.println("SENSE CYCLE");
     Serial.println("================================");
 
     if (lastWindowTimestamp.length() == 0)
     {
-        Serial.println("No hay timestamp previo, solicitando /Time para referencia de ventana.");
+        Serial.println("No previous timestamp, requesting /Time...");
         if (!getServerTime(lastWindowTimestamp))
         {
-            Serial.println("No se pudo obtener timestamp inicial, abortando ronda.\n");
+            Serial.println("Failed to get timestamp, aborting cycle.\n");
             return;
         }
     }
 
     float avgTemp, avgHum, avgLight, avgSmoke, avgPir, avgDistance;
     bool hasTemp, hasHum, hasLight, hasSmoke, hasPir, hasDistance;
+    int motionCount = 0;
 
     bool ok = getReadingsSince(
         lastWindowTimestamp,
@@ -790,12 +1003,13 @@ void runSenseCycle()
         avgLight, hasLight,
         avgSmoke, hasSmoke,
         avgPir, hasPir,
-        avgDistance, hasDistance
+        avgDistance, hasDistance,
+        motionCount
     );
 
     if (!ok)
     {
-        Serial.println("Error obteniendo lecturas, no se evaluara alerta automatica en este ciclo.\n");
+        Serial.println("Failed to get readings, skipping automatic alert check.\n");
         String newTs;
         if (getServerTime(newTs))
         {
@@ -804,7 +1018,7 @@ void runSenseCycle()
         return;
     }
 
-    Serial.println("\nEvaluando condiciones de alerta automatica (OR)...");
+    Serial.println("\nEvaluating fire alert conditions (OR logic)...");
 
     bool fire = false;
     int sensorsTriggered = 0;
@@ -813,40 +1027,51 @@ void runSenseCycle()
     {
         fire = true;
         sensorsTriggered++;
-        Serial.println("Condicion de alerta: temperatura alta supero umbral.");
+        Serial.print("[CONDITION] High temperature: ");
+        Serial.println(avgTemp);
     }
 
     if (hasHum && avgHum < HUM_THRESHOLD_PERCENT)
     {
         fire = true;
         sensorsTriggered++;
-        Serial.println("Condicion de alerta: humedad baja supero umbral.");
+        Serial.print("[CONDITION] Low humidity: ");
+        Serial.println(avgHum);
     }
 
     if (hasLight && avgLight > LIGHT_THRESHOLD)
     {
         fire = true;
         sensorsTriggered++;
-        Serial.println("Condicion de alerta: luz baja supero umbral.");
+        Serial.print("[CONDITION] High light: ");
+        Serial.println(avgLight);
     }
 
     if (hasSmoke && avgSmoke > SMOKE_THRESHOLD)
     {
         fire = true;
         sensorsTriggered++;
-        Serial.println("Condicion de alerta: humo alto supero umbral.");
+        Serial.print("[CONDITION] High smoke: ");
+        Serial.println(avgSmoke);
     }
 
     if (fire && !alertActive)
     {
-        Serial.print("\nAlerta automatica disparada. Sensores involucrados: ");
+        Serial.print("\n[AUTO-ALERT] Triggered! Sensors: ");
         Serial.println(sensorsTriggered);
         startAlert(false, sensorsTriggered);
     }
+    else if (fire && alertActive)
+    {
+        Serial.println("\n[AUTO-ALERT] Would trigger but alert already active");
+    }
     else
     {
-        Serial.println("\nNo se disparo alerta automatica en esta ronda.");
+        Serial.println("\nNo fire conditions detected");
     }
+
+    // Evaluar seguridad
+    checkSecurityWarning(avgDistance, hasDistance, motionCount);
 
     String newTs;
     if (getServerTime(newTs))
@@ -854,19 +1079,19 @@ void runSenseCycle()
         lastWindowTimestamp = newTs;
     }
 
-    Serial.println("\nFin de la ronda de senseo, vectores descartados.\n");
+    Serial.println("\nSense cycle complete.\n");
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // Manejo de botones
-// -----------------------------------------------------------------------------
+// ========================================================================
 void handleButtons()
 {
     bool startPressed = (digitalRead(BTN_START) == LOW);
     bool realPressed = (digitalRead(BTN_REAL) == LOW);
     bool falsePressed = (digitalRead(BTN_FALSE) == LOW);
 
-    if (startPressed && !lastStartPressed && !alertActive && currentMode != MODE_WARNING)
+    if (startPressed && !lastStartPressed && !alertActive && currentMode != MODE_HTTP_WARNING)
     {
         Serial.println("\nBoton iniciar alerta MANUAL presionado.");
         startAlert(true, 0);
@@ -891,11 +1116,16 @@ void handleButtons()
     lastFalsePressed = falsePressed;
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // Inicio y fin de alertas
-// -----------------------------------------------------------------------------
+// ========================================================================
 void startAlert(bool manual, int numSensorsTriggered)
 {
+    if (alertActive)
+    {
+        return;
+    }
+
     alertActive = true;
     alertIsManual = manual;
     currentMode = MODE_ALERT;
@@ -908,9 +1138,11 @@ void startAlert(bool manual, int numSensorsTriggered)
     lastAlertPatternMillis = millis();
 
     String serverNow;
-    if (!getServerTime(serverNow))
+    bool timeOk = getServerTime(serverNow);
+    
+    if (!timeOk)
     {
-        Serial.println("No se pudo obtener timestamp de inicio, la alerta fisica se activa de todos modos.");
+        Serial.println("[ALERT] No server time, pero la alerta física está ACTIVA. Se reintentará registro después.");
         alertStartTimestamp = "";
         currentAlertUuid = "";
         return;
@@ -921,7 +1153,12 @@ void startAlert(bool manual, int numSensorsTriggered)
 
     const char *typeStr = manual ? "manual" : "automatic";
 
-    sendCreateAlert(currentAlertUuid, alertStartTimestamp, numSensorsTriggered, typeStr);
+    bool alertSent = sendCreateAlert(currentAlertUuid, alertStartTimestamp, numSensorsTriggered, typeStr);
+    
+    if (!alertSent)
+    {
+        Serial.println("[ALERT] POST de creación falló, pero alerta FÍSICA sigue activa. HTTP WARNING activo.");
+    }
 }
 
 void endAlert(bool isReal)
@@ -937,58 +1174,63 @@ void endAlert(bool isReal)
     unsigned long elapsedMillis = now - alertStartMillis;
     int responseSeconds = (int)(elapsedMillis / 1000);
 
-    Serial.print("Tiempo de alerta activa: ");
+    Serial.print("[ALERT] Duration: ");
     Serial.print(elapsedMillis);
-    Serial.println(" ms");
-    Serial.print("Tiempo de respuesta: ");
+    Serial.print("ms | Response: ");
     Serial.print(responseSeconds);
-    Serial.println(" segundos");
+    Serial.println("s");
 
-    String serverNow;
-    if (!getServerTime(serverNow))
+    // Si no hay UUID, no se puede hacer PUT, pero se desactiva la alerta física
+    if (currentAlertUuid.length() == 0)
     {
-        Serial.println("No se pudo obtener timestamp de fin. Si hay warning activo, permanece. Si no, se limpia.");
-        // Solo limpiar si NO estamos en warning
-        if (!warningActive)
+        Serial.println("[ALERT] No UUID stored (failed to create), ending physical alert");
+        alertActive = false;
+        
+        if (!httpWarningActive)
         {
-            alertActive = false;
             currentMode = MODE_IDLE;
-            currentAlertUuid = "";
-            alertStartTimestamp = "";
-            alertStartMillis = 0;
             updateConnectionLed();
         }
         return;
     }
 
-    if (currentAlertUuid.length() > 0)
+    // Intentar obtener timestamp de fin
+    String serverNow;
+    bool timeOk = getServerTime(serverNow);
+
+    if (!timeOk)
     {
-        sendUpdateAlert(currentAlertUuid, serverNow, isReal, responseSeconds);
-    }
-    else
-    {
-        Serial.println("No hay UUID de alerta almacenado, no se puede hacer PUT de fin.");
+        Serial.println("[ALERT] No server time for END, ending physical alert");
+        alertActive = false;
+        
+        if (!httpWarningActive)
+        {
+            currentMode = MODE_IDLE;
+            updateConnectionLed();
+        }
+        return;
     }
 
-    // Solo cambiar estado si no entramos en warning por el sendUpdateAlert
-    if (!warningActive)
+    // Intentar enviar PUT de fin
+    bool updateSent = sendUpdateAlert(currentAlertUuid, serverNow, isReal, responseSeconds);
+
+    if (!updateSent)
     {
-        alertActive = false;
-        currentMode = MODE_IDLE;
-        currentAlertUuid = "";
-        alertStartTimestamp = "";
-        alertStartMillis = 0;
-        updateConnectionLed();
+        Serial.println("[ALERT] PUT failed, HTTP_WARNING activo");
     }
-    else
+
+    alertActive = false;
+    
+    if (!httpWarningActive)
     {
-        Serial.println("Alerta desactivada pero en WARNING, esperando que se resuelva HTTP...");
+        currentMode = MODE_IDLE;
+        updateConnectionLed();
     }
 }
 
-// -----------------------------------------------------------------------------
+// ========================================================================
 // Patron de alerta
-// -----------------------------------------------------------------------------
+// ========================================================================
 void updateAlertEffects()
 {
     unsigned long now = millis();
@@ -1045,116 +1287,97 @@ void updateAlertEffects()
     setLedAlertMode();
 }
 
-// -----------------------------------------------------------------------------
-// Modo WARNING - Reintento de CUALQUIER operacion HTTP fallida
-// Incluyendo GET, POST y PUT
-// Se detiene TODO hasta poder postear el warning exitosamente
-// -----------------------------------------------------------------------------
-void enterWarningMode(const String &reason, const String &httpMethod, const String &path, const String &payload)
+// ========================================================================
+// MODO HTTP WARNING - Reintento de operaciones fallidas
+// ========================================================================
+void enterHttpWarningMode(const String &reason, const String &httpMethod, const String &path, const String &payload)
 {
-    if (warningActive)
+    if (httpWarningActive)
     {
         return;
     }
 
-    warningActive = true;
-    currentMode = MODE_WARNING;
-    warningFailureReason = reason;
+    httpWarningActive = true;
+    currentMode = MODE_HTTP_WARNING;
+    httpWarningFailureReason = reason;
     pendingHttpMethod = httpMethod;
     pendingPath = path;
     pendingPayload = payload;
-    lastWarningRetryMillis = millis();
-    lastWarningPatternMillis = millis();
-    warningBeepOn = false;
-    warningStrobeOn = false;
+    lastHttpWarningRetryMillis = millis();
+    lastHttpWarningPatternMillis = millis();
+    httpWarningBeepOn = false;
 
-    setLedWarningMode();
+    setLedHttpWarningMode();
 
-    Serial.println("\n========================================");
-    Serial.println("=== ENTRANDO EN MODO WARNING ===");
-    Serial.println("========================================");
-    Serial.print("Razon: ");
+    Serial.println("\n=====================================");
+    Serial.println("HTTP WARNING ACTIVATED");
+    Serial.println("=====================================");
+    Serial.print("Reason: ");
     Serial.println(reason);
-    Serial.print("Metodo HTTP: ");
+    Serial.print("Method: ");
     Serial.println(httpMethod);
     Serial.print("Path: ");
     Serial.println(path);
-    Serial.println("\nSistema BLOQUEADO. Reintentando cada 3 segundos...");
-    Serial.println("LED: AMARILLO | Buzzer: ON (patron lento)");
-    Serial.println("========================================\n");
+    if (alertActive)
+    {
+        Serial.println("NOTE: ALERT STILL ACTIVE - physical alert continues");
+    }
+    Serial.println("Retrying every 3 seconds...");
+    Serial.println("LED: YELLOW | Buzzer: slow pattern");
+    Serial.println("=====================================\n");
 }
 
-void handleWarningMode()
+void handleHttpWarningMode()
 {
-    updateWarningEffects();
+    updateHttpWarningEffects();
 
     unsigned long now = millis();
 
-    if (now - lastWarningRetryMillis >= WARNING_RETRY_DELAY_MS)
+    if (now - lastHttpWarningRetryMillis >= HTTP_WARNING_RETRY_DELAY_MS)
     {
-        lastWarningRetryMillis = now;
+        lastHttpWarningRetryMillis = now;
         retryPendingHttpRequest();
     }
 }
 
-void postWarningToApi()
+void postSecurityWarningToApi(const char *warningType)
 {
     DynamicJsonDocument doc(512);
-    
+
     doc["idDevice"] = CENTRAL_DEVICE_ID;
-    doc["message"] = "Fallo HTTP al conectar con API central";
-    
-    // Mapear el método HTTP a warningType
-    if (pendingHttpMethod == "GET")
-    {
-        doc["warningType"] = "http_get_failed";
-    }
-    else if (pendingHttpMethod == "POST")
-    {
-        doc["warningType"] = "http_post_failed";
-    }
-    else if (pendingHttpMethod == "PUT")
-    {
-        doc["warningType"] = "http_put_failed";
-    }
-    else
-    {
-        doc["warningType"] = "connection_lost";
-    }
-    
-    doc["httpMethod"] = pendingHttpMethod;
-    doc["httpEndpoint"] = pendingPath;
+    doc["warningType"] = warningType;
+    doc["message"] = "Security warning event detected";
 
     String payload;
     serializeJson(doc, payload);
 
-    Serial.println("\n[WARNING] Registrando fallo HTTP en BD...");
-    Serial.println(payload);
+    Serial.print("[SECURITY] Posting warning to API: ");
+    Serial.println(warningType);
 
     bool success = httpPostJsonRaw(String(WARNING_ENDPOINT), payload);
-    
+
     if (success)
     {
-        Serial.println("[WARNING] Registrado exitosamente en BD");
+        Serial.println("[SECURITY] Warning posted successfully");
     }
     else
     {
-        Serial.println("[WARNING] Fallo al registrar en BD (pero reintentó la operación original)");
+        Serial.println("[SECURITY] Failed to post warning");
     }
 }
 
 void retryPendingHttpRequest()
 {
-    if (!warningActive)
+    if (!httpWarningActive)
     {
         return;
     }
 
     bool success = false;
 
-    Serial.print("\n[RETRY] Reintentando ");
+    Serial.print("\n[RETRY] Attempting ");
     Serial.print(pendingHttpMethod);
-    Serial.print(" en: ");
+    Serial.print(" to ");
     Serial.println(pendingPath);
 
     if (pendingHttpMethod == "GET")
@@ -1173,38 +1396,34 @@ void retryPendingHttpRequest()
 
     if (success)
     {
-        // Ahora que logro la operacion, posteo el warning a BD
         postWarningToApi();
 
-        Serial.println("\n========================================");
-        Serial.println("=== SALIENDO DE MODO WARNING ===");
-        Serial.println("Operacion completada exitosamente!");
-        Serial.println("========================================\n");
+        Serial.println("\n=====================================");
+        Serial.println("HTTP WARNING RESOLVED");
+        Serial.println("Operation completed successfully!");
+        Serial.println("=====================================\n");
         
-        // IMPORTANTE: Limpiar TODOS los estados
-        warningActive = false;
-        currentMode = MODE_IDLE;
+        httpWarningActive = false;
         pendingHttpMethod = "";
         pendingPath = "";
         pendingPayload = "";
-        warningFailureReason = "";
+        httpWarningFailureReason = "";
         
-        // Resetear timestamp para evitar alertas falsas en el siguiente senseo
-        // (después de un warning, los datos pueden ser antiguos)
-        if (!getServerTime(lastWindowTimestamp))
+        // Resetear timestamp para senseo limpio
+        if (getServerTime(lastWindowTimestamp))
         {
-            Serial.println("[WARNING] No se pudo obtener timestamp nuevo, usando timestamp anterior");
-        }
-        else
-        {
-            Serial.println("[RECOVERY] Timestamp reseteado para senseo limpio");
+            Serial.println("[RECOVERY] Timestamp reset, clean sense cycle");
         }
         
-        // Si hay una alerta activa, volver a modo alerta
+        // Decidir siguiente modo
         if (alertActive)
         {
             currentMode = MODE_ALERT;
-            Serial.println("Alerta sigue activa, volviendo a MODE_ALERT");
+            Serial.println("[STATE] Alert still active, returning to MODE_ALERT");
+        }
+        else
+        {
+            currentMode = MODE_IDLE;
         }
         
         clearWarningOutputs();
@@ -1212,42 +1431,36 @@ void retryPendingHttpRequest()
     }
     else
     {
-        Serial.println("[RETRY] Fallo nuevamente. Reintentando en 3 segundos...");
+        Serial.println("[RETRY] Failed again. Retrying in 3 seconds...");
     }
 }
 
-void updateWarningEffects()
+void updateHttpWarningEffects()
 {
     unsigned long now = millis();
 
-    // Patrón de LED amarillo parpadeante
-    // 0.7s prendido, 0.7s apagado
-    unsigned long cycleTime = (now - lastWarningPatternMillis) % (WARNING_BLINK_MS * 2);
-    bool ledOn = cycleTime < WARNING_BLINK_MS;
+    unsigned long cycleTime = (now - lastHttpWarningPatternMillis) % (HTTP_WARNING_BLINK_MS * 2);
+    bool ledOn = cycleTime < HTTP_WARNING_BLINK_MS;
 
     if (ledOn)
     {
-        setLedWarningMode();  // Amarillo ON
+        setLedHttpWarningMode();
     }
     else
     {
-        // LED OFF (negro)
         digitalWrite(LED_R, LOW);
         digitalWrite(LED_G, LOW);
         digitalWrite(LED_B, LOW);
     }
 
-    // Buzzer cada 2 parpadeos (cada 2.8 segundos)
-    // 1 parpadeo = 1.4s (700ms on + 700ms off)
-    // 2 parpadeos = 2.8s
-    unsigned long buzzerCycleTime = (now - lastWarningPatternMillis) % (WARNING_BLINK_MS * 4);
-    bool buzzerTime = (buzzerCycleTime < WARNING_BEEP_DURATION_MS);
+    int freq = map(analogRead(POT_PIN), 0, 1023, HTTP_WARNING_BEEP_MIN_HZ, HTTP_WARNING_BEEP_MAX_HZ);
+    if (freq < HTTP_WARNING_BEEP_MIN_HZ)
+        freq = HTTP_WARNING_BEEP_MIN_HZ;
+    if (freq > HTTP_WARNING_BEEP_MAX_HZ)
+        freq = HTTP_WARNING_BEEP_MAX_HZ;
 
-    int freq = map(analogRead(POT_PIN), 0, 1023, WARNING_BEEP_MIN_HZ, WARNING_BEEP_MAX_HZ);
-    if (freq < WARNING_BEEP_MIN_HZ)
-        freq = WARNING_BEEP_MIN_HZ;
-    if (freq > WARNING_BEEP_MAX_HZ)
-        freq = WARNING_BEEP_MAX_HZ;
+    unsigned long buzzerCycleTime = (now - lastHttpWarningPatternMillis) % (HTTP_WARNING_BLINK_MS * 4);
+    bool buzzerTime = (buzzerCycleTime < HTTP_WARNING_BEEP_DURATION_MS);
 
     if (buzzerTime)
     {
@@ -1258,6 +1471,145 @@ void updateWarningEffects()
         noTone(BUZZER);
     }
 
-    // El estrobo ya no se usa, lo dejamos OFF
     digitalWrite(STROBE, LOW);
+}
+
+// ========================================================================
+// MODO SECURITY WARNING - Detección de intrusión/movimiento
+// ========================================================================
+void checkSecurityWarning(float avgDistance, bool hasDistance, int motionCount)
+{
+    if (securityWarningActive)
+    {
+        return;
+    }
+
+    if (!baselineSet)
+    {
+        if (hasDistance && avgDistance > 0)
+        {
+            baselineDistance = avgDistance;
+            baselineSet = true;
+            Serial.print("[SECURITY-INIT] Baseline distance: ");
+            Serial.print(baselineDistance);
+            Serial.println("cm");
+        }
+        return;
+    }
+
+    bool distanceAnomaly = false;
+    if (hasDistance && avgDistance > 0)
+    {
+        float change = fabs(avgDistance - baselineDistance);
+        if (change > DISTANCE_CHANGE_THRESHOLD_CM)
+        {
+            distanceAnomaly = true;
+            Serial.print("[SECURITY-DIST] Anomaly - baseline: ");
+            Serial.print(baselineDistance);
+            Serial.print("cm -> current: ");
+            Serial.print(avgDistance);
+            Serial.print("cm (delta: ");
+            Serial.print(change);
+            Serial.println("cm)");
+        }
+        baselineDistance = avgDistance;
+    }
+
+    bool motionAnomaly = (motionCount >= PIR_MOTION_THRESHOLD);
+    if (motionAnomaly)
+    {
+        Serial.print("[SECURITY-PIR] Real motion: ");
+        Serial.print(motionCount);
+        Serial.println(" events");
+    }
+
+    if (distanceAnomaly || motionAnomaly)
+    {
+        Serial.println("\n[SECURITY] ALERT TRIGGERED");
+        if (distanceAnomaly && motionAnomaly)
+        {
+            startSecurityWarning("distance_anomaly");
+        }
+        else if (distanceAnomaly)
+        {
+            startSecurityWarning("distance_anomaly");
+        }
+        else
+        {
+            startSecurityWarning("motion_detected");
+        }
+    }
+}
+
+void startSecurityWarning(const char *warningType)
+{
+    if (securityWarningActive)
+    {
+        return;
+    }
+
+    securityWarningActive = true;
+    currentMode = MODE_SECURITY_WARNING;
+    securityWarningType = warningType;
+    unsigned long now = millis();
+
+    securityWarningStartMillis = now;
+    securityWarningEndMillis = now + SECURITY_WARNING_DURATION_MS;
+    lastSecurityPatternMillis = now;
+
+    Serial.println("[SECURITY] Warning activated, 10s duration");
+}
+
+void updateSecurityWarningEffects()
+{
+    unsigned long now = millis();
+    unsigned long elapsed = now - lastSecurityPatternMillis;
+
+    unsigned long cycleTime = (SECURITY_WARNING_ON_MS + SECURITY_WARNING_OFF_MS) * 3 + SECURITY_WARNING_PAUSE_MS;
+    unsigned long posInCycle = elapsed % cycleTime;
+
+    bool ledOn = false;
+    bool buzzerOn = false;
+
+    for (int i = 0; i < 3; i++)
+    {
+        unsigned long start = i * (SECURITY_WARNING_ON_MS + SECURITY_WARNING_OFF_MS);
+        unsigned long onEnd = start + SECURITY_WARNING_ON_MS;
+        unsigned long offEnd = start + SECURITY_WARNING_ON_MS + SECURITY_WARNING_OFF_MS;
+
+        if (posInCycle >= start && posInCycle < onEnd)
+        {
+            ledOn = true;
+            buzzerOn = true;
+            break;
+        }
+        else if (posInCycle >= onEnd && posInCycle < offEnd)
+        {
+            ledOn = false;
+            buzzerOn = false;
+            break;
+        }
+    }
+
+    if (ledOn)
+    {
+        digitalWrite(LED_R, HIGH);
+        digitalWrite(LED_G, HIGH);
+        digitalWrite(LED_B, LOW);
+    }
+    else
+    {
+        digitalWrite(LED_R, LOW);
+        digitalWrite(LED_G, LOW);
+        digitalWrite(LED_B, LOW);
+    }
+
+    if (buzzerOn)
+    {
+        tone(BUZZER, SECURITY_WARNING_BEEP_HZ);
+    }
+    else
+    {
+        noTone(BUZZER);
+    }
 }

@@ -1,7 +1,9 @@
-namespace ApiPirSensor.Models;
-
-public class PirReading
+namespace ApiSmokeSensor.Model
 {
-    public int IdDevice { get; set; }
-    public bool? Motion { get; set; }
+    public class PirReading
+    {
+        public int IdDevice { get; set; }
+        public float? DurationSeconds { get; set; }
+        public int? EventNumber { get; set; }
+    }
 }

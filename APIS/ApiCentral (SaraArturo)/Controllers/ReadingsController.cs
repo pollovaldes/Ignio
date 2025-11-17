@@ -52,7 +52,7 @@ public class ReadingsController : ControllerBase
         result["light"] = Query("SELECT id, id_device, timestamp, value FROM light_reading WHERE timestamp >= @ts", "light");
         result["dht11"] = Query("SELECT id, id_device, timestamp, temperature FROM dht11_reading WHERE timestamp >= @ts", "temperature");
         result["humidity"] = Query("SELECT id, id_device, timestamp, humidity FROM dht11_reading WHERE timestamp >= @ts", "humidity");
-        result["pir"] = Query("SELECT id, id_device, timestamp, motion FROM pir_reading WHERE timestamp >= @ts", "pir");
+        result["pir"] = Query("SELECT id, id_device, timestamp, duration_seconds FROM pir_reading WHERE timestamp >= @ts", "pir");
         result["distance"] = Query("SELECT id, id_device, timestamp, distance_cm FROM distance_reading WHERE timestamp >= @ts", "distance");
 
         return Ok(result);

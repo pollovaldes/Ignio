@@ -3,7 +3,7 @@
 
 // Times
 #define WIFI_RETRY_DELAY 500
-#define SENSOR_INTERVAL 3000
+#define SENSOR_INTERVAL 800  // ← 800ms
 #define POST_BLINK_TIME 100
 
 // Pins
@@ -89,7 +89,7 @@ float readRawDistance()
     delayMicroseconds(12);
     digitalWrite(TRIG, LOW);
 
-    long duration = pulseIn(ECHO, HIGH, 60000); // timeout mayor
+    long duration = pulseIn(ECHO, HIGH, 30000);
 
     if (duration == 0)
     {
@@ -105,10 +105,12 @@ float readFilteredDistance()
     float sum = 0;
     int validCount = 0;
 
-    for (int i = 0; i < 5; i++)   // 5 muestras
+    // Aumenté a 10 muestras para más datos
+    for (int i = 0; i < 10; i++)
     {
         float d = readRawDistance();
-        if (d > 0 && d < 500)     // descarte de valores imposibles
+        // Rango mucho más tolerante: 1cm a 500cm
+        if (d > 1 && d < 500)
         {
             sum += d;
             validCount++;
@@ -116,21 +118,23 @@ float readFilteredDistance()
         delay(5);
     }
 
-    if (validCount == 0)
+    // Si al menos 3 lecturas válidas, usa el promedio
+    // Si menos de 3, devuelve -1
+    if (validCount < 3)
     {
         return -1;
     }
 
     float avg = sum / validCount;
 
-    // Si primera vez, inicializar el EMA
+    // Primera inicialización del EMA
     if (emaDist < 0)
     {
         emaDist = avg;
         return avg;
     }
 
-    const float alpha = 0.45; 
+    // Aplicar suavizado exponencial
     emaDist = alpha * avg + (1 - alpha) * emaDist;
 
     return emaDist;
