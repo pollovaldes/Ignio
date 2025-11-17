@@ -18,6 +18,10 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// Registrar el servicio de limpieza automática
+builder.Services.AddHostedService<ApiCentral.Services.DataCleanupService>();
+
+// Construir app
 var app = builder.Build();
 
 // Activar CORS

@@ -1,113 +1,96 @@
-// Pines RGB
-#define LED_R D0
-#define LED_G D5
-#define LED_B D6
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoJson.h>
+#include "uuid_utils.h"
 
-// Actuadores
-#define BUZZER D3
-#define STROBE D2
+#include "pins.h"
+#include "constants.h"
+#include "central_state.h"
+#include "wifi_client.h"
+#include "utils_leds.h"
+#include "utils_buzzer.h"
+#include "utils_strobe.h"
+#include "server_time.h"
+#include "api_client.h"
+#include "button_logic.h"
+#include "warning_logic.h"
+#include "fire_logic.h"
 
-// Botones
-#define BTN_START D1
-#define BTN_REAL D7
-#define BTN_FALSE D4
+unsigned long lastWindowStart = 0;
+bool windowActive = false;
 
-// Estado de flancos
-bool lastStart = false;
-bool lastReal = false;
-bool lastFalse = false;
+void setup()
+{
+    Serial.begin(115200);
+    delay(300);
 
-void setup() {
-  pinMode(LED_R, OUTPUT);
-  pinMode(LED_G, OUTPUT);
-  pinMode(LED_B, OUTPUT);
-  pinMode(BUZZER, OUTPUT);
-  pinMode(STROBE, OUTPUT);
+    pinMode(LED_R, OUTPUT);
+    pinMode(LED_G, OUTPUT);
+    pinMode(LED_B, OUTPUT);
+    pinMode(BUZZER, OUTPUT);
+    pinMode(STROBE, OUTPUT);
 
-  pinMode(BTN_START, INPUT_PULLUP);
-  pinMode(BTN_REAL, INPUT_PULLUP);
-  pinMode(BTN_FALSE, INPUT_PULLUP);
+    pinMode(BTN_START, INPUT_PULLUP);
+    pinMode(BTN_REAL,  INPUT_PULLUP);
+    pinMode(BTN_FALSE, INPUT_PULLUP);
 
-  digitalWrite(LED_R, LOW);
-  digitalWrite(LED_G, LOW);
-  digitalWrite(LED_B, LOW);
-  digitalWrite(BUZZER, LOW);
-  digitalWrite(STROBE, LOW);
+    pinMode(POT, INPUT);
 
-  Serial.begin(115200);
-  delay(300);
-  Serial.println("Test CENTRAL con potenciómetro listo");
+    setLEDRed();
+    connectWiFi();
+
+    Serial.println("\nCentral lista\n");
 }
 
-void loop() {
-  bool startPressed = digitalRead(BTN_START) == LOW;
-  bool realPressed  = digitalRead(BTN_REAL)  == LOW;
-  bool falsePressed = digitalRead(BTN_FALSE) == LOW;
+void loop()
+{
+    ensureWiFi();
 
-  // ----- Leer potenciómetro -----
-  int pot = analogRead(A0);                       // 0–1023
-  int buzzerVolume = map(pot, 0, 1023, 0, 200);   // Volumen seguro de noche
-  Serial.print("Pot: ");
-  Serial.print(pot);
-  Serial.print("  Volumen mapeado: ");
-  Serial.println(buzzerVolume);
+    updateButtons();
 
-  // ---- INICIAR ALERTA ----
-  if (startPressed && !lastStart) {
-    Serial.println(">> INICIAR ALERTA");
+    unsigned long now = millis();
 
-    digitalWrite(LED_R, HIGH);
-    digitalWrite(LED_G, LOW);
-    digitalWrite(LED_B, LOW);
+    if (!fireActive && !warningActive && (now - lastWindowStart >= READ_WINDOW_MS))
+    {
+        Serial.println("\nINICIANDO NUEVA VENTANA DE LECTURAS...");
+        lastWindowStart = now;
+        windowActive = true;
+    }
 
-    digitalWrite(STROBE, HIGH);
+    if (windowActive && !fireActive)
+    {
+        static unsigned long windowReadCount = 0;
+        windowReadCount++;
 
-    analogWrite(BUZZER, buzzerVolume);
-    delay(80);
-    analogWrite(BUZZER, 0);
-  }
+        int smokeVal = analogRead(A0) % 500;
 
-  // ---- FIN ALERTA REAL ----
-  if (realPressed && !lastReal) {
-    Serial.println(">> FIN ALERTA REAL");
+        if (smokeVal > SMOKE_THRESHOLD)
+        {
+            triggerWarning();
+        }
 
-    digitalWrite(LED_G, HIGH);
-    digitalWrite(LED_R, LOW);
-    digitalWrite(LED_B, LOW);
+        if (windowReadCount >= 5)
+        {
+            Serial.println("Evaluando resultados ventana...");
 
-    digitalWrite(STROBE, LOW);
+            if (smokeVal > FIRE_SMOKE_THRESHOLD)
+            {
+                startFireAlert(1, "automatic");
+            }
 
-    analogWrite(BUZZER, buzzerVolume);
-    delay(60);
-    analogWrite(BUZZER, 0);
-  }
+            windowReadCount = 0;
+            windowActive = false;
+        }
+    }
 
-  // ---- FIN ALERTA FALSA ----
-  if (falsePressed && !lastFalse) {
-    Serial.println(">> FIN ALERTA FALSA");
+    if (fireActive)
+    {
+        updateFireAlert();
+    }
+    else
+    {
+        updateWarning();
+    }
 
-    digitalWrite(LED_B, HIGH);
-    digitalWrite(LED_R, LOW);
-    digitalWrite(LED_G, LOW);
-
-    digitalWrite(STROBE, LOW);
-
-    analogWrite(BUZZER, buzzerVolume);
-    delay(60);
-    analogWrite(BUZZER, 0);
-  }
-
-  // Restablecer LEDs si no hay botones presionados
-  if (!startPressed && !realPressed && !falsePressed) {
-    digitalWrite(LED_R, LOW);
-    digitalWrite(LED_G, LOW);
-    digitalWrite(LED_B, LOW);
-  }
-
-  // Guardar últimos estados
-  lastStart = startPressed;
-  lastReal  = realPressed;
-  lastFalse = falsePressed;
-
-  delay(80);
+    delay(10);
 }
