@@ -67,5 +67,7 @@ void loop()
     // Ejecutar maquina de estados principal
     stateMachine.update();
     
+    // Pequeño delay para evitar watchdog timeout
+    delay(10);
     yield();
 }

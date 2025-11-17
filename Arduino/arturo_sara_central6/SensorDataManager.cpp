@@ -32,6 +32,14 @@ void SensorDataManager::loadFromJson(const String& jsonResponse)
         return;
     }
     
+    // Limpiar vectores antes de cargar nuevas lecturas
+    smokeReadings.clear();
+    lightReadings.clear();
+    temperatureReadings.clear();
+    humidityReadings.clear();
+    pirReadings.clear();
+    distanceReadings.clear();
+    
     // Procesar smoke
     if (doc.containsKey("smoke"))
     {
@@ -238,6 +246,11 @@ float SensorDataManager::getAverageSmoke(int lastN)
     return getAverage(smokeReadings, lastN);
 }
 
+float SensorDataManager::getAverageLight(int lastN)
+{
+    return getAverage(lightReadings, lastN);
+}
+
 bool SensorDataManager::hasRecentMotion(int lastN)
 {
     if (pirReadings.empty())
@@ -260,6 +273,11 @@ bool SensorDataManager::hasRecentMotion(int lastN)
     }
     
     return false;
+}
+
+float SensorDataManager::getAverageDistance(int lastN)
+{
+    return getAverage(distanceReadings, lastN);
 }
 
 int SensorDataManager::getTotalValidReadings()

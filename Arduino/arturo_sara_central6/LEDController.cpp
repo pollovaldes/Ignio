@@ -18,10 +18,10 @@ void LEDController::init()
     pinMode(LED_G, OUTPUT);
     pinMode(LED_B, OUTPUT);
     pinMode(STROBE_PIN, OUTPUT);
-    
+
     turnOffRGB();
     digitalWrite(STROBE_PIN, LOW);
-    
+
     Serial.println("LED Controller inicializado");
 }
 
@@ -41,56 +41,58 @@ void LEDController::update()
             return;
         }
     }
-    
+
     // Comportamiento segun modo
     switch (currentMode)
     {
-        case LED_MODE_CONNECTION:
-            if (connectionState)
+    case LED_MODE_CONNECTION:
+        if (connectionState)
+        {
+            setColor(LED_GREEN);
+        }
+        else
+        {
+            setColor(LED_RED);
+        }
+        break;
+
+    case LED_MODE_WARNING:
+        // Parpadeo amarillo lento
+        if (millis() - lastBlinkTime >= LED_BLINK_SLOW_MS)
+        {
+            lastBlinkTime = millis();
+            if (currentColor == LED_YELLOW)
             {
-                setColor(LED_GREEN);
+                setColor(LED_OFF);
+            }
+            else
+            {
+                setColor(LED_YELLOW);
+            }
+        }
+        break;
+
+    case LED_MODE_ALERT:
+        // Parpadeo rojo rapido + estrobo sincronizado
+        if (millis() - lastBlinkTime >= LED_BLINK_FAST_MS)
+        {
+            lastBlinkTime = millis();
+            if (currentColor == LED_RED)
+            {
+                setColor(LED_OFF);
+                digitalWrite(STROBE_PIN, LOW);
             }
             else
             {
                 setColor(LED_RED);
+                digitalWrite(STROBE_PIN, HIGH);
             }
-            break;
-            
-        case LED_MODE_WARNING:
-            // Parpadeo amarillo lento
-            if (millis() - lastBlinkTime >= LED_BLINK_SLOW_MS)
-            {
-                lastBlinkTime = millis();
-                if (currentColor == LED_YELLOW)
-                {
-                    setColor(LED_OFF);
-                }
-                else
-                {
-                    setColor(LED_YELLOW);
-                }
-            }
-            break;
-            
-        case LED_MODE_ALERT:
-            // Parpadeo rojo rapido
-            if (millis() - lastBlinkTime >= LED_BLINK_FAST_MS)
-            {
-                lastBlinkTime = millis();
-                if (currentColor == LED_RED)
-                {
-                    setColor(LED_OFF);
-                }
-                else
-                {
-                    setColor(LED_RED);
-                }
-            }
-            break;
-            
-        case LED_MODE_CONFIRMATION:
-            // No hacer nada, la confirmacion se maneja arriba
-            break;
+        }
+        break;
+
+    case LED_MODE_CONFIRMATION:
+        // No hacer nada, la confirmacion se maneja arriba
+        break;
     }
 }
 
@@ -137,30 +139,30 @@ void LEDController::setStrobeState(bool state)
 void LEDController::setColor(LEDColor color)
 {
     currentColor = color;
-    
+
     switch (color)
     {
-        case LED_OFF:
-            turnOffRGB();
-            break;
-            
-        case LED_RED:
-            digitalWrite(LED_R, HIGH);
-            digitalWrite(LED_G, LOW);
-            digitalWrite(LED_B, LOW);
-            break;
-            
-        case LED_GREEN:
-            digitalWrite(LED_R, LOW);
-            digitalWrite(LED_G, HIGH);
-            digitalWrite(LED_B, LOW);
-            break;
-            
-        case LED_YELLOW:
-            digitalWrite(LED_R, HIGH);
-            digitalWrite(LED_G, HIGH);
-            digitalWrite(LED_B, LOW);
-            break;
+    case LED_OFF:
+        turnOffRGB();
+        break;
+
+    case LED_RED:
+        digitalWrite(LED_R, HIGH);
+        digitalWrite(LED_G, LOW);
+        digitalWrite(LED_B, LOW);
+        break;
+
+    case LED_GREEN:
+        digitalWrite(LED_R, LOW);
+        digitalWrite(LED_G, HIGH);
+        digitalWrite(LED_B, LOW);
+        break;
+
+    case LED_YELLOW:
+        digitalWrite(LED_R, HIGH);
+        digitalWrite(LED_G, HIGH);
+        digitalWrite(LED_B, LOW);
+        break;
     }
 }
 

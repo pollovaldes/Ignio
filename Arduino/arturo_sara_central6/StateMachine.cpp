@@ -85,8 +85,6 @@ void StateMachine::handleIdleState()
             transitionToState(STATE_SENSING);
         }
     }
-
-    delay(1000);
 }
 
 void StateMachine::handleSensingState()
@@ -122,32 +120,24 @@ void StateMachine::handleSensingState()
             // Evaluar condiciones de incendio
             if (evaluateFireConditions())
             {
-                fireDetectionRounds++;
-                Serial.print("Ronda de deteccion de incendio: ");
-                Serial.println(fireDetectionRounds);
+                Serial.println("INCENDIO DETECTADO!");
 
-                if (fireDetectionRounds >= FIRE_DETECTION_ROUNDS)
-                {
-                    Serial.println("INCENDIO DETECTADO!");
+                // Contar sensores que participaron
+                int numSensors = 0;
+                if (sensorDataManager->getAverageTemperature() > FIRE_TEMP_THRESHOLD)
+                    numSensors++;
+                if (sensorDataManager->getAverageHumidity() < FIRE_HUMIDITY_THRESHOLD &&
+                    sensorDataManager->getAverageHumidity() > 0)
+                    numSensors++;
+                if (sensorDataManager->getAverageSmoke() > FIRE_SMOKE_THRESHOLD)
+                    numSensors++;
+                if (sensorDataManager->getAverageLight() > FIRE_LIGHT_THRESHOLD)
+                    numSensors++;
 
-                    // Contar sensores que participaron
-                    int numSensors = 0;
-                    if (sensorDataManager->getAverageTemperature() > FIRE_TEMP_THRESHOLD)
-                        numSensors++;
-                    if (sensorDataManager->getAverageHumidity() < FIRE_HUMIDITY_THRESHOLD)
-                        numSensors++;
-                    if (sensorDataManager->getAverageSmoke() > FIRE_SMOKE_THRESHOLD)
-                        numSensors++;
-
-                    alertManager->startAutomaticAlert(numSensors);
-                    transitionToState(STATE_ALERT_ACTIVE);
-                    fireDetectionRounds = 0;
-                    return;
-                }
-            }
-            else
-            {
+                alertManager->startAutomaticAlert(numSensors);
+                transitionToState(STATE_ALERT_ACTIVE);
                 fireDetectionRounds = 0;
+                return;
             }
 
             // Evaluar condiciones de advertencia
@@ -156,17 +146,13 @@ void StateMachine::handleSensingState()
                 Serial.println("Condiciones de advertencia detectadas");
 
                 // Determinar tipo de advertencia
-                if (sensorDataManager->getAverageTemperature() > WARNING_TEMP_THRESHOLD)
+                if (sensorDataManager->hasRecentMotion(3))
                 {
-                    warningManager->startWarning("temperature", "Temperatura elevada detectada");
+                    warningManager->startWarning("pir", "Movimiento detectado");
                 }
-                else if (sensorDataManager->getAverageHumidity() < WARNING_HUMIDITY_THRESHOLD)
+                else if (sensorDataManager->getAverageDistance(3) < WARNING_DISTANCE_THRESHOLD)
                 {
-                    warningManager->startWarning("humidity", "Humedad baja detectada");
-                }
-                else if (sensorDataManager->getAverageSmoke() > WARNING_SMOKE_THRESHOLD)
-                {
-                    warningManager->startWarning("smoke", "Humo detectado");
+                    warningManager->startWarning("distance", "Objeto cercano detectado");
                 }
 
                 transitionToState(STATE_WARNING_ACTIVE);
@@ -243,80 +229,70 @@ void StateMachine::checkButtons()
 bool StateMachine::evaluateFireConditions()
 {
     // Verificar que hay suficientes lecturas
-    if (sensorDataManager->getTotalValidReadings() < 5)
+    if (sensorDataManager->getTotalValidReadings() < 1)
     {
         return false;
     }
 
-    bool highTemp = false;
-    bool lowHumidity = false;
-    bool highSmoke = false;
+    // OR simple: cualquier sensor dispara alerta
 
     // Evaluar temperatura
     float avgTemp = sensorDataManager->getAverageTemperature();
     if (avgTemp > FIRE_TEMP_THRESHOLD)
     {
-        highTemp = true;
-        Serial.print("Temperatura alta: ");
+        Serial.print("ALERTA: Temperatura alta: ");
         Serial.println(avgTemp);
+        return true;
     }
 
     // Evaluar humedad
     float avgHumidity = sensorDataManager->getAverageHumidity();
     if (avgHumidity < FIRE_HUMIDITY_THRESHOLD && avgHumidity > 0)
     {
-        lowHumidity = true;
-        Serial.print("Humedad baja: ");
+        Serial.print("ALERTA: Humedad baja: ");
         Serial.println(avgHumidity);
+        return true;
     }
 
     // Evaluar humo
     float avgSmoke = sensorDataManager->getAverageSmoke();
     if (avgSmoke > FIRE_SMOKE_THRESHOLD)
     {
-        highSmoke = true;
-        Serial.print("Humo alto: ");
+        Serial.print("ALERTA: Humo alto: ");
         Serial.println(avgSmoke);
+        return true;
     }
 
-    // Requiere al menos 2 condiciones criticas
-    int criticalConditions = 0;
-    if (highTemp)
-        criticalConditions++;
-    if (lowHumidity)
-        criticalConditions++;
-    if (highSmoke)
-        criticalConditions++;
+    // Evaluar luz (fotoresistencia alta indica fuego)
+    float avgLight = sensorDataManager->getAverageLight();
+    if (avgLight > FIRE_LIGHT_THRESHOLD)
+    {
+        Serial.print("ALERTA: Luz alta (fuego): ");
+        Serial.println(avgLight);
+        return true;
+    }
 
-    return criticalConditions >= 2;
+    return false;
 }
 
 bool StateMachine::evaluateWarningConditions()
 {
-    // Verificar que hay suficientes lecturas
-    if (sensorDataManager->getTotalValidReadings() < 3)
-    {
-        return false;
-    }
+    // Advertencias solo dependen de PIR y distancia
 
-    // Evaluar temperatura elevada
-    float avgTemp = sensorDataManager->getAverageTemperature();
-    if (avgTemp > WARNING_TEMP_THRESHOLD && avgTemp <= FIRE_TEMP_THRESHOLD)
+    // Verificar PIR (movimiento detectado)
+    if (sensorDataManager->hasRecentMotion(3))
     {
+        Serial.println("ADVERTENCIA: Movimiento detectado (PIR)");
         return true;
     }
 
-    // Evaluar humedad baja
-    float avgHumidity = sensorDataManager->getAverageHumidity();
-    if (avgHumidity < WARNING_HUMIDITY_THRESHOLD && avgHumidity >= FIRE_HUMIDITY_THRESHOLD && avgHumidity > 0)
+    // Verificar distancia (objeto cercano)
+    float avgDistance = sensorDataManager->getAverageDistance(3);
+    if (avgDistance > 0 && avgDistance < WARNING_DISTANCE_THRESHOLD)
     {
-        return true;
-    }
-
-    // Evaluar humo moderado
-    float avgSmoke = sensorDataManager->getAverageSmoke();
-    if (avgSmoke > WARNING_SMOKE_THRESHOLD && avgSmoke < FIRE_SMOKE_THRESHOLD)
-    {
+        Serial.print("ADVERTENCIA: Objeto cercano: ");
+        Serial.print(avgDistance);
+        Serial.println(" cm");
         return true;
     }
 
