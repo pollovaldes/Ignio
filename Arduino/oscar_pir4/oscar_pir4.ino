@@ -7,10 +7,10 @@
 #define POST_BLINK_TIME 100
 
 // Pins
-#define PIR D2
-#define LED_VERDE D5
-#define LED_ROJO D6
-#define LED_MOVIMIENTO D7
+#define PIR D8
+#define LED_VERDE D2
+#define LED_ROJO D0
+#define LED_MOVIMIENTO D1
 
 // WiFi
 const char *ssid = "Mi perro cuando";
