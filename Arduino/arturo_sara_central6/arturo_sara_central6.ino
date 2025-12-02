@@ -58,12 +58,12 @@
 #define POT_PIN A0
 
 // Configuracion WiFi
-const char *WIFI_SSID = "Mi perro cuando";
-const char *WIFI_PASSWORD = "SggUD6o4rWN?7IaOdHqkXv2HB";
+const char *WIFI_SSID = "iPhone de Arturo";
+const char *WIFI_PASSWORD = "123456789";
 
 // API central
 #define CENTRAL_DEVICE_ID 1
-const char *API_BASE = "http://192.168.1.166:5075";
+const char *API_BASE = "http://172.20.10.5:5075";
 const char *TIME_ENDPOINT = "/Time";
 const char *READINGS_SINCE_BASE = "/Readings/since/";
 const char *ALERT_ENDPOINT = "/Alert";

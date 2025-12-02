@@ -13,11 +13,11 @@
 #define ECHO D5
 
 // WiFi
-const char *ssid = "Mi perro cuando";
-const char *password = "SggUD6o4rWN?7IaOdHqkXv2HB";
+const char* ssid = "iPhone de Arturo";
+const char* password = "123456789";
 
 // API endpoint
-const char *apiUrl = "http://192.168.1.166:5073/Distance";
+const char *apiUrl = "http://172.20.10.5:5073/Distance";
 
 // Smooth filter
 float emaDist = -1;

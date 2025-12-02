@@ -12,11 +12,11 @@
 #define PHOTO A0
 
 // WiFi
-const char *ssid = "Mi perro cuando";
-const char *password = "SggUD6o4rWN?7IaOdHqkXv2HB";
+const char* ssid = "iPhone de Arturo";
+const char* password = "123456789";
 
 // API endpoint
-const char *apiUrl = "http://192.168.1.166:5071/Light";
+const char *apiUrl = "http://172.20.10.5:5071/Light";
 
 // Smoothing filter
 float emaValue = -1;

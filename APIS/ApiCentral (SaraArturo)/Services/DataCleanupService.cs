@@ -38,12 +38,12 @@ namespace ApiCentral.Services
 
             string[] queries =
             {
-                "DELETE FROM dht11_reading WHERE timestamp < NOW(3) - INTERVAL 15 MINUTE;",
-                "DELETE FROM smoke_reading WHERE timestamp < NOW(3) - INTERVAL 10 MINUTE;",
-                "DELETE FROM light_reading WHERE timestamp < NOW(3) - INTERVAL 10 MINUTE;",
-                "DELETE FROM distance_reading WHERE timestamp < NOW(3) - INTERVAL 5 MINUTE;",
-                "DELETE FROM pir_reading WHERE timestamp < NOW(3) - INTERVAL 5 MINUTE;",
-                "DELETE FROM button_reading WHERE timestamp < NOW(3) - INTERVAL 20 MINUTE;"
+                "DELETE FROM dht11_readin WHERE timestamp < NOW(3) - INTERVAL 15 MINUTE;",
+                "DELETE FROM smoke_readin WHERE timestamp < NOW(3) - INTERVAL 10 MINUTE;",
+                "DELETE FROM light_readin WHERE timestamp < NOW(3) - INTERVAL 10 MINUTE;",
+                "DELETE FROM distance_readin WHERE timestamp < NOW(3) - INTERVAL 5 MINUTE;",
+                "DELETE FROM pir_readig WHERE timestamp < NOW(3) - INTERVAL 5 MINUTE;",
+                "DELETE FROM button_readin WHERE timestamp < NOW(3) - INTERVAL 20 MINUTE;"
             };
 
             foreach (string q in queries)

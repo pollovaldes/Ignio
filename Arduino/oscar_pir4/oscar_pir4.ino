@@ -13,11 +13,11 @@
 #define LED_MOVIMIENTO D7
 
 // WiFi
-const char *ssid = "Mi perro cuando";
-const char *password = "SggUD6o4rWN?7IaOdHqkXv2HB";
+const char* ssid = "iPhone de Arturo";
+const char* password = "123456789";
 
 // API URL
-const char *apiUrl = "http://192.168.1.166:5074/Pir";
+const char *apiUrl = "http://172.20.10.5:5074/Pir";
 
 // State
 int lastReadState = LOW;
