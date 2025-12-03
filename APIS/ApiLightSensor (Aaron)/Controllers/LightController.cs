@@ -18,7 +18,7 @@ public class LightController : ControllerBase // constructor
     [HttpPost]
     public IActionResult PostLight([FromBody] LightReading reading) 
     {
-        string connStr = _config.GetConnectionString("DefaultConnection");
+        string connStr = _config.GetConnectionString("DefaultConnection"); // tomo la configuracion de la cadena 
 
         using var conn = new MySqlConnection(connStr); // habre la conexion con mysql
         conn.Open();
